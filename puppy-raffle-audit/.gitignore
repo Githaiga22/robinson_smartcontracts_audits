@@ -4,7 +4,14 @@ cache/
 
 # Foundry
 broadcast/
+
+# Dependencies — managed via git submodules, not tracked directly
+lib/
+
+# OS artifacts
 .DS_Store
+**/.DS_Store
 
 # Environment
 .env
+.env.*
