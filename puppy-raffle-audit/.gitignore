@@ -1,0 +1,10 @@
+# Compiler output
+out/
+cache/
+
+# Foundry
+broadcast/
+.DS_Store
+
+# Environment
+.env
