@@ -289,6 +289,68 @@ cd topizzy/smart_contracts
 FOUNDRY_PROFILE=audit forge test --match-test test_treasuryDrainsAllUserFunds -vvvv
 ```
 
+**Live Anvil demo — `script/AttackTreasuryDrain.sol`**
+
+Deploy MockUSDC + Airtime, fund 3 users, then drain everything in a single transaction:
+```bash
+forge script script/AttackTreasuryDrain.sol --tc AttackTreasuryDrain \
+  --rpc-url http://127.0.0.1:8545 --broadcast
+```
+
+Script output:
+```
+=== H-2: TREASURY FULL DRAIN SETUP ===
+Airtime contract : 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
+MockUSDC         : 0x5FbDB2315678afecb367f032d93F642f64180aa3
+Treasury         : 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+
+Users and deposits:
+  User1: 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 -> $500 USDC
+  User2: 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC -> $1000 USDC
+  User3: 0x90F79bf6EB2c4f870365E785982E1f101E93b906 -> $750 USDC
+
+---------- BEFORE ATTACK ----------
+Total deposited : $2,250 USDC
+Treasury USDC   : $0
+No timelock. No spending cap. No multi-sig.
+
+---------- AFTER ATTACK (1 transaction) ----------
+Contract USDC   : $0  (completely drained)
+Treasury USDC   : $2,250 (all user deposits stolen)
+
+CONFIRMED: withdrawTreasury() drained all 3 users funds.
+One private key. One transaction. Zero recourse.
+```
+
+All 12 on-chain transactions confirmed (`ONCHAIN EXECUTION COMPLETE & SUCCESSFUL`).
+
+Verify damage with `cast` after the script:
+```bash
+# Contract holds 0 USDC -- completely drained
+cast call 0x5FbDB2315678afecb367f032d93F642f64180aa3 \
+  "balanceOf(address)(uint256)" 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
+  --rpc-url http://127.0.0.1:8545
+# 0
+
+# Treasury received all 2,250 USDC in one call
+cast call 0x5FbDB2315678afecb367f032d93F642f64180aa3 \
+  "balanceOf(address)(uint256)" 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 \
+  --rpc-url http://127.0.0.1:8545
+# 2250000000000000000000 [2.25e21]  <- 2,250 USDC
+```
+
+**On-chain damage summary:**
+
+| Address | Role | USDC Before | USDC After |
+|---------|------|-------------|------------|
+| `0xe7f1...0512` | Airtime contract | 2,250 | **0** |
+| `0xf39F...2266` | Treasury (attacker) | 0 | **2,250** |
+| `0x7099...79C8` | User1 (victim) | 0 | **0** |
+| `0x3C44...93BC` | User2 (victim) | 0 | **0** |
+| `0x90F7...b906` | User3 (victim) | 0 | **0** |
+
+All 3 users deposited USDC expecting airtime. A single `withdrawTreasury()` call — one transaction, one private key — moved every dollar to the treasury with no delay, no alert, and no recourse.
+
 #### Recommended Mitigation
 
 **Option 1 — Use a multi-sig wallet as treasury (minimum viable fix)**
