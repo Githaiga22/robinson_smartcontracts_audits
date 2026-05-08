@@ -78,17 +78,40 @@ The entire deduplication responsibility is delegated to the off-chain backend da
 
 #### Proof of Concept
 
+**Forge test — `test/audit/AirtimeAudit.t.sol::test_doubleRefundDrainsOtherUsersFunds`**
+
 ```solidity
-// Attacker (or buggy backend) calls refund twice with the same orderRef
-// Contract balance: 1000 USDC (from 20 real user deposits)
+function test_doubleRefundDrainsOtherUsersFunds() public {
+    // Three users deposit 100 USDC each — 300 USDC total in contract
+    // userA's top-up fails — treasury correctly issues one refund
+    airtime.refund("ORDER-A", userA, 100e18);
 
-airtime.refund("ORDER-001", victim, 1000e6);   // first call — drains everything
-airtime.refund("ORDER-001", victim, 1000e6);   // second call — reverts (balance 0), but damage done
+    // BUG: same ORDER-A refunded again (backend bug or compromised key)
+    // Contract has NO check — processes it without reverting
+    airtime.refund("ORDER-A", userA, 100e18);
 
-// OR: repeated small refunds
-for (uint i = 0; i < 100; i++) {
-    airtime.refund("ORDER-001", attacker, 10e6); // drains 10 USDC each time
+    // userA received 200 USDC from a 100 USDC deposit
+    // userB and userC's funds drained to cover the double refund
+    assertEq(usdc.balanceOf(userA), 200e18);         // double-paid
+    assertEq(usdc.balanceOf(address(airtime)), 100e18); // userB or userC lost 100 USDC
 }
+```
+
+**Test result:**
+```
+[PASS] test_doubleRefundDrainsOtherUsersFunds() (gas: 263498)
+Logs:
+  ---------- H-1: DOUBLE REFUND ----------
+  Contract USDC balance before (wei): 300000000000000000000
+  Contract USDC balance after  (wei): 100000000000000000000
+  userA received (wei)               : 200000000000000000000
+  CONFIRMED: Same orderRef refunded twice. Other users lost funds.
+```
+
+Run with:
+```bash
+cd topizzy/smart_contracts
+FOUNDRY_PROFILE=audit forge test --match-test test_doubleRefundDrainsOtherUsersFunds -vvvv
 ```
 
 #### Recommended Mitigation
@@ -162,16 +185,37 @@ All deposited user funds are secured by the secrecy of a **single private key** 
 
 #### Proof of Concept
 
-```solidity
-// Attacker obtained TREASURY_PRIVATE_KEY from leaked .env file
-// One transaction is all it takes:
+**Forge test — `test/audit/AirtimeAudit.t.sol::test_treasuryDrainsAllUserFunds`**
 
-vm.prank(compromisedTreasury);
-airtime.withdrawTreasury(
-    attackerAddress,
-    usdc.balanceOf(address(airtime))  // everything
-);
-// All user deposits gone. No timelock. No circuit breaker. No recourse.
+```solidity
+function test_treasuryDrainsAllUserFunds() public {
+    // Five users deposit a total of 1500 USDC
+    // Treasury (or attacker with treasury key) calls withdrawTreasury once
+    uint256 contractBalance = usdc.balanceOf(address(airtime));
+    airtime.withdrawTreasury(treasury, contractBalance);
+
+    // All 1500 USDC gone in a single transaction — no timelock, no limit
+    assertEq(usdc.balanceOf(address(airtime)), 0);
+}
+```
+
+**Test result:**
+```
+[PASS] test_treasuryDrainsAllUserFunds() (gas: 371158)
+Logs:
+  ---------- H-2: TREASURY FULL DRAIN ----------
+  Total user deposits (wei) : 1500000000000000000000
+  Treasury balance before   : 0
+  Contract balance after    : 0
+  Treasury balance after    : 1500000000000000000000
+  Total drained (wei)       : 1500000000000000000000
+  CONFIRMED: Single tx drained all user deposits. No timelock. No limit.
+```
+
+Run with:
+```bash
+cd topizzy/smart_contracts
+FOUNDRY_PROFILE=audit forge test --match-test test_treasuryDrainsAllUserFunds -vvvv
 ```
 
 #### Recommended Mitigation
