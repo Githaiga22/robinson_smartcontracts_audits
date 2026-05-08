@@ -126,6 +126,7 @@ Severity is determined by combining **likelihood** (how easy is it to trigger?) 
 | Protocol | Type | Findings | Report |
 |---------|------|---------|--------|
 | [PuppyRaffle](./puppy-raffle-audit/) | NFT Raffle / ERC-721 | 3 High, 3 Medium, 2 Low, 4 Info | [findings.md](./puppy-raffle-audit/findings.md) |
+| [Topizzy](./topizzy/) | USDC Payment Gateway / Airtime | 2 High, 3 Medium, 2 Low, 3 Info | [findings.md](./topizzy/findings.md) |
 
 ---
 
