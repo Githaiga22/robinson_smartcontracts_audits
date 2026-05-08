@@ -3,4 +3,11 @@ src = "src"
 out = "out"
 libs = ["lib"]
 
+# Audit profile — compiles only our PoC tests, leaving the broken original untouched as evidence
+[profile.audit]
+src = "src"
+out = "out"
+libs = ["lib"]
+test = "test/audit"
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
