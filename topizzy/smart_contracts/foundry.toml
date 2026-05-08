@@ -2,8 +2,9 @@
 src = "src"
 out = "out"
 libs = ["lib"]
+test = "test/audit"   # broken test/Airtime.t.sol preserved in test/ as evidence for finding I-1
 
-# Audit profile — compiles only our PoC tests, leaving the broken original untouched as evidence
+# Audit profile — explicit alias for running PoC tests
 [profile.audit]
 src = "src"
 out = "out"
